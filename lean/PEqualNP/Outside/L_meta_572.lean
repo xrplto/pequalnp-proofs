@@ -1,531 +1,534 @@
 import Mathlib
 import PEqualNP.Defs
 
-namespace PEqualNP.Outside.L_meta_572_aux
+namespace LMeta572
 
 open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity
 
--- One evaluation step: the gate adds one wire.
-def stp (w : List Bool) (g : Gate) : List Bool :=
+theorem getD_snoc_eq {α : Type} (L : List α) (S d : α) : (L ++ [S]).getD L.length d = S := by
+  simp
+
+def wmap (n m : ℕ) (π : Fin n → Fin m) (w : ℕ) : ℕ :=
+  if h : w < n then (π ⟨w, h⟩ : ℕ) else w - n + m
+
+def relGate (n m : ℕ) (π : Fin n → Fin m) (g : Gate) : Gate :=
+  ⟨g.op, g.inputs.map (wmap n m π)⟩
+
+def relabel (n m : ℕ) (π : Fin n → Fin m) (C : Circuit) : Circuit :=
+  ⟨C.gates.map (relGate n m π), wmap n m π C.output⟩
+
+def step (w : List Bool) (g : Gate) : List Bool :=
   w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]
 
-theorem wires_eq (C : Circuit) (x : List Bool) : C.wires x = C.gates.foldl stp x := rfl
+def Rel (n m : ℕ) (π : Fin n → Fin m) (W W' : List Bool) : Prop :=
+  n ≤ W.length ∧ W'.length + n = W.length + m ∧
+    ∀ w : ℕ, W'.getD (wmap n m π w) false = W.getD w false
 
-theorem foldl_length (gs : List Gate) : ∀ W : List Bool,
-    (gs.foldl stp W).length = W.length + gs.length := by
+theorem rel_step (n m : ℕ) (π : Fin n → Fin m) (W W' : List Bool) (g : Gate)
+    (h : Rel n m π W W') : Rel n m π (step W g) (step W' (relGate n m π g)) := by
+  obtain ⟨h1, h2, h3⟩ := h
+  have hv : (relGate n m π g).op.eval
+      ((relGate n m π g).inputs.map fun i => W'.getD i false)
+      = g.op.eval (g.inputs.map fun i => W.getD i false) := by
+    simp only [relGate, List.map_map]
+    congr 1
+    apply List.map_congr_left
+    intro a _
+    exact h3 a
+  refine ⟨by simp [step]; omega, by simp [step]; omega, ?_⟩
+  intro w
+  simp only [step, hv]
+  rcases Nat.lt_trichotomy w W.length with hw | hw | hw
+  · have hlt : wmap n m π w < W'.length := by
+      unfold wmap
+      split
+      · have := (π ⟨w, by assumption⟩).2; omega
+      · omega
+    rw [List.getD_append _ _ _ _ hlt, List.getD_append _ _ _ _ hw]
+    exact h3 w
+  · have he : wmap n m π w = W'.length := by
+      unfold wmap
+      split
+      · omega
+      · omega
+    rw [he, hw, getD_snoc_eq, getD_snoc_eq]
+  · have hge : W'.length + 1 ≤ wmap n m π w := by
+      unfold wmap
+      split
+      · omega
+      · omega
+    rw [List.getD_eq_default _ _ (by simp; omega), List.getD_eq_default _ _ (by simp; omega)]
+
+theorem rel_fold (n m : ℕ) (π : Fin n → Fin m) (gs : List Gate) :
+    ∀ W W' : List Bool, Rel n m π W W' →
+      Rel n m π (gs.foldl step W) ((gs.map (relGate n m π)).foldl step W') := by
   induction gs with
-  | nil => intro W; simp
+  | nil => intro W W' h; exact h
   | cons g gs ih =>
-    intro W
-    simp only [List.foldl_cons, List.length_cons]
-    rw [ih]
-    simp [stp]
+    intro W W' h
+    exact ih _ _ (rel_step n m π W W' g h)
+
+theorem rel_init (n m : ℕ) (π : Fin n → Fin m) (x : Fin m → Bool) :
+    Rel n m π (List.ofFn (x ∘ π)) (List.ofFn x) := by
+  refine ⟨by simp, by simp; omega, ?_⟩
+  intro w
+  unfold wmap
+  split
+  · rename_i hw
+    rw [List.getD_eq_getElem _ _ (by simp), List.getD_eq_getElem _ _ (by simpa using hw)]
+    simp
+  · rename_i hw
+    rw [List.getD_eq_default _ _ (by simp), List.getD_eq_default _ _ (by simp; omega)]
+
+theorem relabel_size {n m : ℕ} (π : Fin n → Fin m) (h : (Fin n → Bool) → Bool) (s : ℕ)
+    (hc : HasCircuitSize n h s) : HasCircuitSize m (fun x => h (x ∘ π)) s := by
+  obtain ⟨C, ok, hsz, hev⟩ := hc
+  refine ⟨relabel n m π C, ?_, ?_, ?_⟩
+  · intro g hg
+    obtain ⟨g0, hg0, rfl⟩ := List.mem_map.1 hg
+    exact ⟨(ok g0 hg0).1, by simpa [relGate] using (ok g0 hg0).2⟩
+  · simpa [relabel, Circuit.size] using hsz
+  · intro x
+    show _ = h (x ∘ π)
+    rw [← hev (x ∘ π)]
+    exact (rel_fold n m π C.gates _ _ (rel_init n m π x)).2.2 C.output
+
+theorem plug {m r s : ℕ} (f : (Fin m → Bool) → Bool) (H : (Fin (m+1) → Bool) → Bool)
+    (hf : HasCircuitSize m f r) (hh : HasCircuitSize (m+1) H s)
+    (live : ∃ x, f x = true) :
+    HasCircuitSize m (fun x => H (Fin.snoc x (f x))) (r+s) := by
+  obtain ⟨D,okD,szD,evD⟩ := hf
+  let M := m + D.gates.length
+  have len (x : Fin m → Bool) : (D.wires (List.ofFn x)).length = M := by
+    have aux (gs : List Gate) (W : List Bool) :
+        (gs.foldl step W).length = W.length + gs.length := by
+      induction gs generalizing W with
+      | nil => simp
+      | cons h t ih => simp [List.foldl,ih,step]; omega
+    change (D.gates.foldl step _).length = _
+    rw [aux]; simp [M]
+  have valid : D.output < M := by
+    obtain ⟨x,hx⟩ := live
+    by_contra! hx'
+    have h := evD x
+    unfold Circuit.eval at h
+    rw [List.getD_eq_default _ _ (by rw [len]; exact hx'), hx] at h
+    contradiction
+  let π : Fin (m+1) → Fin M := Fin.snoc (fun i : Fin m => (⟨i.val, by dsimp [M]; omega⟩ : Fin M)) ⟨D.output,valid⟩
+  obtain ⟨C,okC,szC,evC⟩ := relabel_size π H s hh
+  refine ⟨⟨D.gates ++ C.gates,C.output⟩,?_,?_,?_⟩
+  · intro g hg
+    rcases List.mem_append.mp hg with h|h
+    · exact okD g h
+    · exact okC g h
+  · change (D.gates++C.gates).length ≤ _
+    change D.gates.length ≤ _ at szD
+    change C.gates.length ≤ _ at szC
+    simp; omega
+  · intro x
+    let W := D.wires (List.ofFn x)
+    let z : Fin M → Bool := fun i => W.getD i.val false
+    have ofz : List.ofFn z = W := by
+      apply List.ext_getElem <;> simp [z,W,len]
+    have hz : z ∘ π = Fin.snoc x (f x) := by
+      funext i; refine Fin.lastCases ?_ (fun j => ?_) i
+      · simpa [z,π,W,Circuit.eval] using evD x
+      · have keep (gs : List Gate) (w : List Bool) (j : Nat) (hj : j < w.length) :
+            (gs.foldl step w).getD j false = w.getD j false := by
+          induction gs generalizing w with
+          | nil => rfl
+          | cons h t ih =>
+            rw [List.foldl_cons,ih (step w h) (by simp [step]; omega)]
+            exact List.getD_append _ _ _ _ hj
+        simp only [Function.comp_apply,π,Fin.snoc_castSucc]
+        change (D.gates.foldl step (List.ofFn x)).getD j.val false = x j
+        rw [keep _ _ _ (by simp)]
+        simp [List.getD_eq_getElem]
+    have h : C.eval (List.ofFn z) = H (z ∘ π) := evC z
+    rw [hz] at h
+    change ((D.gates ++ C.gates).foldl step _).getD C.output false = _
+    rw [List.foldl_append]
+    change (C.gates.foldl step W).getD C.output false = _
+    change (C.gates.foldl step (List.ofFn z)).getD C.output false = _ at h
+    rw [ofz] at h
+    exact h
+theorem weaken {m s t : ℕ} {f : (Fin m → Bool) → Bool}
+    (h : HasCircuitSize m f s) (hle : s ≤ t) : HasCircuitSize m f t := by
+  obtain ⟨C, ok, sz, ev⟩ := h
+  exact ⟨C,ok,sz.trans hle,ev⟩
+theorem input {m : ℕ} (i : Fin m) : HasCircuitSize m (fun x => x i) 0 := by
+  refine ⟨⟨[],i.val⟩,by simp [FanInTwo],by simp [Circuit.size],?_⟩
+  intro x; simp [Circuit.eval,Circuit.wires,List.getD_eq_getElem]
+theorem addWire {m : ℕ} (a b : Fin m) (op : GateOp) (ho : op = .and ∨ op = .or) :
+    HasCircuitSize m (fun x => op.eval [x a,x b]) 1 := by
+  refine ⟨⟨[⟨op,[a,b]⟩],m⟩,?_,by simp [Circuit.size],?_⟩
+  · intro g hg; simp at hg; subst g
+    obtain rfl|rfl := ho <;> simp
+  · intro x
+    simp [Circuit.eval,Circuit.wires,List.getD_eq_getElem]
+theorem binary {m s t : ℕ} {f g : (Fin m → Bool) → Bool}
+    (hf : HasCircuitSize m f s) (hg : HasCircuitSize m g t)
+    (lf : ∃ x, f x = true) (lg : ∃ x, g x = true)
+    (op : GateOp) (ho : op = .and ∨ op = .or) :
+    HasCircuitSize m (fun x => op.eval [f x,g x]) (s+t+1) := by
+  let G : (Fin (m+1) → Bool) → Bool := fun z => g (fun i => z i.castSucc)
+  have hG : HasCircuitSize (m+1) G t := relabel_size Fin.castSucc g t hg
+  have lG : ∃ x, G x = true := by
+    obtain ⟨x,hx⟩ := lg
+    exact ⟨Fin.snoc x false, by simpa [G] using hx⟩
+  have h1 := addWire (Fin.last m).castSucc (Fin.last (m+1)) op ho
+  have h2 := plug G _ hG h1 lG
+  have h3 := plug f _ hf h2 lf
+  simpa [G,Nat.add_assoc] using h3
+theorem orSize {m s t : ℕ} {f g : (Fin m → Bool) → Bool}
+    (hf : HasCircuitSize m f s) (hg : HasCircuitSize m g t) :
+    HasCircuitSize m (fun x => f x || g x) (s+t+1) := by
+  by_cases lf : ∃ x, f x = true
+  · by_cases lg : ∃ x, g x = true
+    · simpa [GateOp.eval] using binary hf hg lf lg .or (Or.inr rfl)
+    · have h x : g x = false := by cases he : g x <;> simp_all
+      simpa [h] using weaken hf (show s ≤ s+t+1 by omega)
+  · have h x : f x = false := by cases he : f x <;> simp_all
+    simpa [h] using weaken hg (show t ≤ s+t+1 by omega)
+theorem andLive {m s t : ℕ} {f g : (Fin m → Bool) → Bool}
+    (hf : HasCircuitSize m f s) (hg : HasCircuitSize m g t)
+    (lf : ∃ x, f x = true) (lg : ∃ x, g x = true) :
+    HasCircuitSize m (fun x => f x && g x) (s+t+1) := by
+  simpa [GateOp.eval] using binary hf hg lf lg .and (Or.inl rfl)
+
+
+theorem congrSize {M : ℕ} {f f' : (Fin M → Bool) → Bool} {s : ℕ}
+    (h : HasCircuitSize M f' s) (e : ∀ x, f x = f' x) : HasCircuitSize M f s := by
+  have e' : f = f' := funext e
+  rw [e']
+  exact h
+
+theorem qcast {Q : ℕ → Prop} {a b : ℕ} (h : Q a) (e : a = b) : Q b := by
+  rw [← e]
+  exact h
+
+def inp (M i : ℕ) (x : Fin M → Bool) : Bool := if hi : i < M then x ⟨i, hi⟩ else false
+
+theorem inp_size (M i : ℕ) (hi : i < M) : HasCircuitSize M (inp M i) 0 := by
+  refine congrSize (input (⟨i, hi⟩ : Fin M)) (fun x => ?_)
+  unfold inp
+  rw [dif_pos hi]
+
+theorem inp_live (M i : ℕ) (hi : i < M) : inp M i (fun _ => true) = true := by
+  unfold inp
+  rw [dif_pos hi]
+
+theorem inp_natAdd (N K : ℕ) (x : Fin (N + K) → Bool) (i : Fin K) :
+    inp (N + K) (N + i.val) x = x (Fin.natAdd N i) := by
+  have hi : N + i.val < N + K := by
+    have := i.isLt
     omega
-
-theorem getD_snoc_eq (W : List Bool) (v : Bool) : (W ++ [v]).getD W.length false = v := by
-  simp [List.getD_eq_getElem?_getD]
-
-theorem getD_ge (W : List Bool) (i : ℕ) (h : W.length ≤ i) : W.getD i false = false := by
-  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_none h]
+  unfold inp
+  rw [dif_pos hi]
   rfl
 
-theorem getD_ofFn {m : ℕ} (x : Fin m → Bool) (i : ℕ) (h : i < m) :
-    (List.ofFn x).getD i false = x ⟨i, h⟩ := by
-  simp [List.getD_eq_getElem?_getD, h]
-
--- The new name of a wire: the first `a` wires move by `σ`, the others shift from `a` to `b`.
-def rho (a b : ℕ) (σ : ℕ → ℕ) (i : ℕ) : ℕ := if i < a then σ i else i - a + b
-
-def relG (ρ : ℕ → ℕ) (g : Gate) : Gate := ⟨g.op, g.inputs.map ρ⟩
-
-theorem getD_rho (ID Inew rest : List Bool) (σ : ℕ → ℕ)
-    (hσ : ∀ i, i < ID.length → σ i < Inew.length ∧ ID.getD i false = Inew.getD (σ i) false)
-    (i : ℕ) :
-    (Inew ++ rest).getD (rho ID.length Inew.length σ i) false = (ID ++ rest).getD i false := by
-  unfold rho
-  by_cases h : i < ID.length
-  · rw [if_pos h, List.getD_append _ _ _ _ (hσ i h).1, List.getD_append _ _ _ _ h]
-    exact (hσ i h).2.symm
-  · rw [if_neg h]
-    have h1 : ID.length ≤ i := Nat.le_of_not_lt h
-    rw [List.getD_append_right _ _ _ _ (by omega), List.getD_append_right _ _ _ _ h1]
-    congr 1
+theorem inp_castAdd (N K : ℕ) (x : Fin (N + K) → Bool) (w : Fin N) :
+    inp (N + K) w.val x = x (Fin.castAdd K w) := by
+  have hw : w.val < N + K := by
+    have := w.isLt
     omega
+  unfold inp
+  rw [dif_pos hw]
+  rfl
 
-theorem relabel_spec (ID Inew : List Bool) (σ : ℕ → ℕ)
-    (hσ : ∀ i, i < ID.length → σ i < Inew.length ∧ ID.getD i false = Inew.getD (σ i) false)
-    (gs : List Gate) :
-    ∀ rest : List Bool, ∃ rest' : List Bool,
-      (gs.map (relG (rho ID.length Inew.length σ))).foldl stp (Inew ++ rest) = Inew ++ rest' ∧
-        gs.foldl stp (ID ++ rest) = ID ++ rest' := by
-  induction gs with
-  | nil => intro rest; exact ⟨rest, rfl, rfl⟩
-  | cons g gs ih =>
-    intro rest
-    obtain ⟨rest', h1, h2⟩ :=
-      ih (rest ++ [g.op.eval (g.inputs.map fun i => (ID ++ rest).getD i false)])
-    refine ⟨rest', ?_, ?_⟩
-    · rw [← h1]
-      simp only [List.map_cons, List.foldl_cons]
-      congr 1
-      simp only [stp, relG, List.map_map]
-      have : ((fun i => (Inew ++ rest).getD i false) ∘ rho ID.length Inew.length σ)
-          = fun i => (ID ++ rest).getD i false := by
-        funext i
-        exact getD_rho ID Inew rest σ hσ i
-      rw [this]
-      simp
-    · rw [← h2]
-      simp only [List.foldl_cons]
-      congr 1
-      simp [stp]
+def term (M a b c : ℕ) (x : Fin M → Bool) : Bool := inp M c x && (inp M a x || inp M b x)
 
--- Each term (c, l, r) adds three gates: OR(l, r), AND(c, that), OR(the output so far, that).
-def addTerms : List (ℕ × ℕ × ℕ) → ℕ → ℕ → List Gate
-  | [], _, _ => []
-  | (c, l, r) :: ts, L, acc =>
-    ⟨GateOp.or, [l, r]⟩ :: ⟨GateOp.and, [c, L]⟩ :: ⟨GateOp.or, [acc, L + 1]⟩ ::
-      addTerms ts (L + 3) (L + 2)
+theorem term_true (M a b c : ℕ) (x : Fin M → Bool) :
+    term M a b c x = true ↔ inp M c x = true ∧ (inp M a x = true ∨ inp M b x = true) := by
+  unfold term
+  rw [Bool.and_eq_true, Bool.or_eq_true]
 
-def finalAcc : List (ℕ × ℕ × ℕ) → ℕ → ℕ → ℕ
-  | [], _, acc => acc
-  | _ :: ts, L, _ => finalAcc ts (L + 3) (L + 2)
+theorem term_size (M a b c : ℕ) (ha : a < M) (hb : b < M) (hc : c < M) :
+    HasCircuitSize M (term M a b c) 2 := by
+  have h1 := orSize (inp_size M a ha) (inp_size M b hb)
+  have l1 : ∃ x : Fin M → Bool, (inp M a x || inp M b x) = true :=
+    ⟨fun _ => true, by rw [inp_live M a ha]; rfl⟩
+  have h2 := andLive (inp_size M c hc) h1 ⟨fun _ => true, inp_live M c hc⟩ l1
+  exact congrSize (weaken h2 (by omega)) (fun x => rfl)
 
-theorem addTerms_length : ∀ (ts : List (ℕ × ℕ × ℕ)) (L acc : ℕ),
-    (addTerms ts L acc).length = 3 * ts.length := by
-  intro ts
-  induction ts with
-  | nil => intro L acc; simp [addTerms]
-  | cons τ ts ih =>
-    intro L acc
-    obtain ⟨c, l, r⟩ := τ
-    simp only [addTerms, List.length_cons, ih]
-    omega
+def orUpTo {α : Type} (t : ℕ → α → Bool) : ℕ → α → Bool
+  | 0, _ => false
+  | (m + 1), x => orUpTo t m x || t m x
 
-theorem addTerms_ok : ∀ (ts : List (ℕ × ℕ × ℕ)) (L acc : ℕ), ∀ g ∈ addTerms ts L acc,
-    g.op ∈ ({GateOp.and, GateOp.or, GateOp.not} : Set GateOp) ∧ g.inputs.length ≤ 2 := by
-  intro ts
-  induction ts with
-  | nil => intro L acc g hg; simp [addTerms] at hg
-  | cons τ ts ih =>
-    intro L acc g hg
-    obtain ⟨c, l, r⟩ := τ
-    simp only [addTerms, List.mem_cons] at hg
-    rcases hg with rfl | rfl | rfl | hg
-    · simp
-    · simp
-    · simp
-    · exact ih _ _ g hg
+theorem orUpTo_zero {α : Type} (t : ℕ → α → Bool) (x : α) : orUpTo t 0 x = false := rfl
 
-theorem addTerms_spec : ∀ (ts : List (ℕ × ℕ × ℕ)) (W : List Bool) (acc : ℕ),
-    (acc < W.length ∨ W.length + 3 * ts.length ≤ acc) →
-    (∀ τ ∈ ts, τ.1 < W.length ∧ τ.2.1 < W.length ∧ τ.2.2 < W.length) →
-    (((addTerms ts W.length acc).foldl stp W).getD (finalAcc ts W.length acc) false = true ↔
-      (W.getD acc false = true ∨ ∃ τ ∈ ts, W.getD τ.1 false = true ∧
-        (W.getD τ.2.1 false = true ∨ W.getD τ.2.2 false = true))) := by
-  intro ts
-  induction ts with
-  | nil => intro W acc _ _; simp [addTerms, finalAcc]
-  | cons τ ts ih =>
-    intro W acc hacc hts
-    obtain ⟨c, l, r⟩ := τ
-    obtain ⟨hc, hl, hr⟩ := hts (c, l, r) (by simp)
-    simp only at hc hl hr
-    have s1 : stp W ⟨GateOp.or, [l, r]⟩ = W ++ [W.getD l false || W.getD r false] := by
-      simp [stp, GateOp.eval]
-    have s2 : stp (W ++ [W.getD l false || W.getD r false]) ⟨GateOp.and, [c, W.length]⟩
-        = W ++ [W.getD l false || W.getD r false]
-          ++ [W.getD c false && (W.getD l false || W.getD r false)] := by
-      simp only [stp, List.map_cons, List.map_nil]
-      rw [List.getD_append _ _ _ _ hc, getD_snoc_eq]
-      simp [GateOp.eval]
-    have hacc' : (W ++ [W.getD l false || W.getD r false]
-        ++ [W.getD c false && (W.getD l false || W.getD r false)]).getD acc false
-        = W.getD acc false := by
-      rcases hacc with h | h
-      · rw [List.append_assoc, List.getD_append _ _ _ _ h]
-      · simp only [List.length_cons] at h
-        rw [getD_ge _ _ (by simp; omega), getD_ge _ _ (by omega)]
-    have hlen2 : (W ++ [W.getD l false || W.getD r false]).length = W.length + 1 := by simp
-    have s3 : stp (W ++ [W.getD l false || W.getD r false]
-        ++ [W.getD c false && (W.getD l false || W.getD r false)])
-          ⟨GateOp.or, [acc, W.length + 1]⟩
-        = W ++ [W.getD l false || W.getD r false]
-          ++ [W.getD c false && (W.getD l false || W.getD r false)]
-          ++ [W.getD acc false || (W.getD c false && (W.getD l false || W.getD r false))] := by
-      simp only [stp, List.map_cons, List.map_nil]
-      rw [hacc', ← hlen2, getD_snoc_eq]
-      simp [GateOp.eval]
-    simp only [addTerms, finalAcc, List.foldl_cons]
-    rw [s1, s2, s3]
-    generalize hW' : W ++ [W.getD l false || W.getD r false]
-        ++ [W.getD c false && (W.getD l false || W.getD r false)]
-        ++ [W.getD acc false || (W.getD c false && (W.getD l false || W.getD r false))] = W'
-    have hlen' : W'.length = W.length + 3 := by rw [← hW']; simp
-    have hpre : ∀ i, i < W.length → W'.getD i false = W.getD i false := by
-      intro i hi
-      rw [← hW', List.append_assoc, List.append_assoc]
-      exact List.getD_append _ _ _ _ hi
-    have hlast : W'.getD (W.length + 2) false
-        = (W.getD acc false || (W.getD c false && (W.getD l false || W.getD r false))) := by
-      rw [← hW']
-      have e : (W ++ [W.getD l false || W.getD r false]
-          ++ [W.getD c false && (W.getD l false || W.getD r false)]).length = W.length + 2 := by
-        simp
-      rw [← e]
-      exact getD_snoc_eq _ _
-    have hts' : ∀ τ ∈ ts, τ.1 < W'.length ∧ τ.2.1 < W'.length ∧ τ.2.2 < W'.length := by
-      intro τ hτ
-      obtain ⟨a1, a2, a3⟩ := hts τ (by simp [hτ])
-      exact ⟨by omega, by omega, by omega⟩
-    have key := ih W' (W.length + 2) (Or.inl (by omega)) hts'
-    rw [hlen'] at key
-    rw [key, hlast]
+theorem orUpTo_succ {α : Type} (t : ℕ → α → Bool) (m : ℕ) (x : α) :
+    orUpTo t (m + 1) x = (orUpTo t m x || t m x) := rfl
+
+theorem orUpTo_true {α : Type} (t : ℕ → α → Bool) (m : ℕ) (x : α) :
+    orUpTo t m x = true ↔ ∃ k, k < m ∧ t k x = true := by
+  induction m with
+  | zero =>
+    rw [orUpTo_zero]
     constructor
-    · rintro (h | ⟨τ, hτ, h1, h2⟩)
-      · simp only [Bool.or_eq_true, Bool.and_eq_true] at h
-        rcases h with h | ⟨h1, h2⟩
-        · exact Or.inl h
-        · exact Or.inr ⟨(c, l, r), by simp, h1, h2⟩
-      · obtain ⟨a1, a2, a3⟩ := hts τ (by simp [hτ])
-        rw [hpre _ a1] at h1
-        rw [hpre _ a2, hpre _ a3] at h2
-        exact Or.inr ⟨τ, by simp [hτ], h1, h2⟩
-    · rintro (h | ⟨τ, hτ, h1, h2⟩)
+    · intro h
+      exact absurd h (by decide)
+    · rintro ⟨k, hk, _⟩
+      omega
+  | succ m ih =>
+    rw [orUpTo_succ, Bool.or_eq_true, ih]
+    constructor
+    · rintro (⟨k, hk, hkt⟩ | h)
+      · exact ⟨k, Nat.lt_succ_of_lt hk, hkt⟩
+      · exact ⟨m, Nat.lt_succ_self m, h⟩
+    · rintro ⟨k, hk, hkt⟩
+      rcases Nat.lt_succ_iff_lt_or_eq.mp hk with hk' | rfl
+      · exact Or.inl ⟨k, hk', hkt⟩
+      · exact Or.inr hkt
+
+theorem bigOr {M : ℕ} (f : (Fin M → Bool) → Bool) (t : ℕ → (Fin M → Bool) → Bool) (s : ℕ)
+    (hf : HasCircuitSize M f s) :
+    ∀ m : ℕ, (∀ k, k < m → HasCircuitSize M (t k) 2) →
+      HasCircuitSize M (fun x => f x || orUpTo t m x) (s + 3 * m) := by
+  intro m
+  induction m with
+  | zero =>
+    intro _
+    refine congrSize (weaken hf (by omega)) (fun x => ?_)
+    show (f x || orUpTo t 0 x) = f x
+    rw [orUpTo_zero, Bool.or_false]
+  | succ m ih =>
+    intro ht
+    have h1 := ih (fun k hk => ht k (Nat.lt_succ_of_lt hk))
+    have h2 := orSize h1 (ht m (Nat.lt_succ_self m))
+    refine congrSize (weaken h2 (by omega)) (fun x => ?_)
+    show (f x || orUpTo t (m + 1) x) = ((f x || orUpTo t m x) || t m x)
+    rw [orUpTo_succ, Bool.or_assoc]
+
+theorem pathE_iff (N K : ℕ) (u v : Fin N) (x : Fin (N + K) → Bool) :
+    (∃ i : Fin K, x (Fin.natAdd N i) = true ∧ ((i.val = 0 ∧ x (Fin.castAdd K u) = true) ∨
+      (i.val + 1 = K ∧ x (Fin.castAdd K v) = true) ∨
+      ∃ j : Fin K, j.val = i.val + 1 ∧ x (Fin.natAdd N j) = true)) ↔
+    ∃ i : ℕ, i < K ∧ inp (N + K) (N + i) x = true ∧ ((i = 0 ∧ inp (N + K) u.val x = true) ∨
+      (i + 1 = K ∧ inp (N + K) v.val x = true) ∨
+      (i + 1 < K ∧ inp (N + K) (N + (i + 1)) x = true)) := by
+  constructor
+  · rintro ⟨i, hp, hr⟩
+    refine ⟨i.val, i.isLt, ?_, ?_⟩
+    · rw [inp_natAdd N K x]
+      exact hp
+    · rcases hr with ⟨h0, hu⟩ | ⟨hl, hv⟩ | ⟨j, hj, hpj⟩
+      · refine Or.inl ⟨h0, ?_⟩
+        rw [inp_castAdd N K x]
+        exact hu
+      · refine Or.inr (Or.inl ⟨hl, ?_⟩)
+        rw [inp_castAdd N K x]
+        exact hv
+      · have hjlt := j.isLt
+        refine Or.inr (Or.inr ⟨by omega, ?_⟩)
+        rw [← hj, inp_natAdd N K x]
+        exact hpj
+  · rintro ⟨i, hi, hp, hr⟩
+    refine ⟨⟨i, hi⟩, ?_, ?_⟩
+    · rw [← inp_natAdd N K x]
+      exact hp
+    · rcases hr with ⟨h0, hu⟩ | ⟨hl, hv⟩ | ⟨hlt, hpj⟩
+      · refine Or.inl ⟨h0, ?_⟩
+        rw [← inp_castAdd N K x]
+        exact hu
+      · refine Or.inr (Or.inl ⟨hl, ?_⟩)
+        rw [← inp_castAdd N K x]
+        exact hv
+      · refine Or.inr (Or.inr ⟨⟨i + 1, hlt⟩, rfl, ?_⟩)
+        rw [← inp_natAdd N K x]
+        exact hpj
+
+theorem combA (Q : ℕ → Prop) (N h uu vv : ℕ) :
+    (∃ i : ℕ, i < 2 * h + 1 ∧ Q (N + i) ∧ ((i = 0 ∧ Q uu) ∨ (i + 1 = 2 * h + 1 ∧ Q vv) ∨
+      (i + 1 < 2 * h + 1 ∧ Q (N + (i + 1))))) ↔
+    ∃ k : ℕ, k < h + 1 ∧ Q (N + 2 * k) ∧
+      (Q (if k = 0 then uu else N + 2 * k - 1) ∨ Q (if k = h then vv else N + 2 * k + 1)) := by
+  constructor
+  · rintro ⟨i, hi, hq, hr⟩
+    rcases Nat.even_or_odd' i with ⟨k, rfl | rfl⟩
+    · refine ⟨k, by omega, hq, ?_⟩
+      rcases hr with ⟨h0, hu⟩ | ⟨hl, hv⟩ | ⟨hlt, hn⟩
       · left
-        rw [Bool.or_eq_true]
-        exact Or.inl h
-      · rcases List.mem_cons.mp hτ with rfl | hτ
-        · left
-          simp only at h1 h2
-          simp only [Bool.or_eq_true, Bool.and_eq_true]
-          exact Or.inr ⟨h1, h2⟩
-        · obtain ⟨a1, a2, a3⟩ := hts τ (by simp [hτ])
-          right
-          refine ⟨τ, hτ, ?_, ?_⟩
-          · rw [hpre _ a1]; exact h1
-          · rw [hpre _ a2, hpre _ a3]; exact h2
-
--- A circuit on other inputs, with terms added on top.
-def extC (a b : ℕ) (σ : ℕ → ℕ) (D : Circuit) (ts : List (ℕ × ℕ × ℕ)) : Circuit :=
-  ⟨D.gates.map (relG (rho a b σ)) ++ addTerms ts (b + D.gates.length)
-      (if D.output < a + D.gates.length then rho a b σ D.output
-        else b + D.gates.length + 3 * ts.length),
-    finalAcc ts (b + D.gates.length)
-      (if D.output < a + D.gates.length then rho a b σ D.output
-        else b + D.gates.length + 3 * ts.length)⟩
-
-theorem extC_fanin (a b : ℕ) (σ : ℕ → ℕ) (D : Circuit) (ts : List (ℕ × ℕ × ℕ))
-    (hF : FanInTwo D) : FanInTwo (extC a b σ D ts) := by
-  intro g hg
-  rcases List.mem_append.mp hg with hg | hg
-  · obtain ⟨g0, hg0, rfl⟩ := List.mem_map.mp hg
-    have := hF g0 hg0
-    exact ⟨this.1, by simpa [relG] using this.2⟩
-  · exact addTerms_ok _ _ _ g hg
-
-theorem extC_size (a b : ℕ) (σ : ℕ → ℕ) (D : Circuit) (ts : List (ℕ × ℕ × ℕ)) :
-    (extC a b σ D ts).size = D.size + 3 * ts.length := by
-  show (D.gates.map _ ++ addTerms ts _ _).length = D.gates.length + 3 * ts.length
-  rw [List.length_append, List.length_map, addTerms_length]
-
-theorem extC_eval (D : Circuit) (ID Inew : List Bool) (σ : ℕ → ℕ) (ts : List (ℕ × ℕ × ℕ))
-    (hσ : ∀ i, i < ID.length → σ i < Inew.length ∧ ID.getD i false = Inew.getD (σ i) false)
-    (hts : ∀ τ ∈ ts, τ.1 < Inew.length ∧ τ.2.1 < Inew.length ∧ τ.2.2 < Inew.length) :
-    ((extC ID.length Inew.length σ D ts).eval Inew = true ↔
-      (D.eval ID = true ∨ ∃ τ ∈ ts, Inew.getD τ.1 false = true ∧
-        (Inew.getD τ.2.1 false = true ∨ Inew.getD τ.2.2 false = true))) := by
-  obtain ⟨rest', h1, h2⟩ := relabel_spec ID Inew σ hσ D.gates []
-  rw [List.append_nil] at h1 h2
-  have hrl : rest'.length = D.gates.length := by
-    have := foldl_length D.gates ID
-    rw [h2] at this
-    simp at this
-    omega
-  have hWlen : (Inew ++ rest').length = Inew.length + D.gates.length := by simp [hrl]
-  have hev : (extC ID.length Inew.length σ D ts).eval Inew
-      = ((addTerms ts (Inew ++ rest').length
-          (if D.output < ID.length + D.gates.length then rho ID.length Inew.length σ D.output
-            else Inew.length + D.gates.length + 3 * ts.length)).foldl stp (Inew ++ rest')).getD
-          (finalAcc ts (Inew ++ rest').length
-            (if D.output < ID.length + D.gates.length then rho ID.length Inew.length σ D.output
-              else Inew.length + D.gates.length + 3 * ts.length)) false := by
-    rw [hWlen]
-    simp only [Circuit.eval, wires_eq, extC, List.foldl_append, h1]
-  have hDev : D.eval ID = (ID ++ rest').getD D.output false := by
-    simp only [Circuit.eval, wires_eq, h2]
-  have hacc : (Inew ++ rest').getD
-      (if D.output < ID.length + D.gates.length then rho ID.length Inew.length σ D.output
-        else Inew.length + D.gates.length + 3 * ts.length) false = D.eval ID := by
-    rw [hDev]
-    split_ifs with hin
-    · exact getD_rho ID Inew rest' σ hσ D.output
-    · rw [getD_ge _ _ (by rw [List.length_append, hrl]; omega),
-        getD_ge _ _ (by rw [List.length_append, hrl]; omega)]
-  have hcond : ((if D.output < ID.length + D.gates.length then rho ID.length Inew.length σ D.output
-        else Inew.length + D.gates.length + 3 * ts.length) < (Inew ++ rest').length ∨
-      (Inew ++ rest').length + 3 * ts.length ≤
-        (if D.output < ID.length + D.gates.length then rho ID.length Inew.length σ D.output
-          else Inew.length + D.gates.length + 3 * ts.length)) := by
-    split_ifs with hin
-    · left
-      rw [hWlen]
-      unfold rho
-      split_ifs with h3
-      · have := (hσ _ h3).1
-        omega
+        rw [if_pos (by omega : k = 0)]
+        exact hu
+      · right
+        rw [if_pos (by omega : k = h)]
+        exact hv
+      · right
+        rw [if_neg (by omega : ¬ k = h)]
+        exact qcast hn (by omega)
+    · rcases hr with ⟨h0, _⟩ | ⟨hl, _⟩ | ⟨hlt, hn⟩
       · omega
-    · right
-      rw [hWlen]
-  have hts' : ∀ τ ∈ ts, τ.1 < (Inew ++ rest').length ∧ τ.2.1 < (Inew ++ rest').length ∧
-      τ.2.2 < (Inew ++ rest').length := by
-    intro τ hτ
-    obtain ⟨a1, a2, a3⟩ := hts τ hτ
-    rw [hWlen]
-    exact ⟨by omega, by omega, by omega⟩
-  rw [hev, addTerms_spec ts (Inew ++ rest') _ hcond hts', hacc]
+      · omega
+      · refine ⟨k + 1, by omega, qcast hn (by omega), Or.inl ?_⟩
+        rw [if_neg (by omega : ¬ k + 1 = 0)]
+        exact qcast hq (by omega)
+  · rintro ⟨k, hk, hq, hl | hr⟩
+    · by_cases h0 : k = 0
+      · rw [if_pos h0] at hl
+        exact ⟨0, by omega, qcast hq (by omega), Or.inl ⟨rfl, hl⟩⟩
+      · rw [if_neg h0] at hl
+        exact ⟨2 * k - 1, by omega, qcast hl (by omega),
+          Or.inr (Or.inr ⟨by omega, qcast hq (by omega)⟩)⟩
+    · by_cases hkh : k = h
+      · rw [if_pos hkh] at hr
+        exact ⟨2 * k, by omega, hq, Or.inr (Or.inl ⟨by omega, hr⟩)⟩
+      · rw [if_neg hkh] at hr
+        exact ⟨2 * k, by omega, hq, Or.inr (Or.inr ⟨by omega, qcast hr (by omega)⟩)⟩
+
+theorem combB (Q : ℕ → Prop) (N h uu vv : ℕ) :
+    (∃ i : ℕ, i < 2 * h + 1 ∧ Q (N + i) ∧ ((i = 0 ∧ Q uu) ∨ (i + 1 = 2 * h + 1 ∧ Q vv) ∨
+      (i + 1 < 2 * h + 1 ∧ Q (N + (i + 1))))) ↔
+    ((Q uu ∧ Q N) ∨ (Q vv ∧ Q (N + 2 * h))) ∨
+      ∃ k : ℕ, k < h ∧ Q (N + (2 * k + 1)) ∧ (Q (N + 2 * k) ∨ Q (N + (2 * k + 2))) := by
   constructor
-  · rintro (h | ⟨τ, hτ, e1, e2⟩)
-    · exact Or.inl h
-    · obtain ⟨a1, a2, a3⟩ := hts τ hτ
-      rw [List.getD_append _ _ _ _ a1] at e1
-      rw [List.getD_append _ _ _ _ a2, List.getD_append _ _ _ _ a3] at e2
-      exact Or.inr ⟨τ, hτ, e1, e2⟩
-  · rintro (h | ⟨τ, hτ, e1, e2⟩)
-    · exact Or.inl h
-    · obtain ⟨a1, a2, a3⟩ := hts τ hτ
-      refine Or.inr ⟨τ, hτ, ?_, ?_⟩
-      · rw [List.getD_append _ _ _ _ a1]; exact e1
-      · rw [List.getD_append _ _ _ _ a2, List.getD_append _ _ _ _ a3]; exact e2
+  · rintro ⟨i, hi, hq, hr⟩
+    rcases hr with ⟨h0, hu⟩ | ⟨hl, hv⟩ | ⟨hlt, hn⟩
+    · exact Or.inl (Or.inl ⟨hu, qcast hq (by omega)⟩)
+    · exact Or.inl (Or.inr ⟨hv, qcast hq (by omega)⟩)
+    · rcases Nat.even_or_odd' i with ⟨k, rfl | rfl⟩
+      · exact Or.inr ⟨k, by omega, qcast hn (by omega), Or.inl hq⟩
+      · exact Or.inr ⟨k, by omega, hq, Or.inr (qcast hn (by omega))⟩
+  · rintro ((⟨hu, hN⟩ | ⟨hv, hNh⟩) | ⟨k, hk, hq, hl | hr⟩)
+    · exact ⟨0, by omega, qcast hN (by omega), Or.inl ⟨rfl, hu⟩⟩
+    · exact ⟨2 * h, by omega, hNh, Or.inr (Or.inl ⟨rfl, hv⟩)⟩
+    · exact ⟨2 * k, by omega, hl, Or.inr (Or.inr ⟨by omega, hq⟩)⟩
+    · exact ⟨2 * k + 1, by omega, hq, Or.inr (Or.inr ⟨by omega, qcast hr (by omega)⟩)⟩
 
--- The terms of the first circuit: the even inner inputs are the centres.
-def ts1 (N h a b : ℕ) : List (ℕ × ℕ × ℕ) :=
-  (List.range (h + 1)).map (fun k => (N + 2 * k, (if k = 0 then a else N + (2 * k - 1)),
-    (if k = h then b else N + (2 * k + 1))))
+def tA (N h uu vv k : ℕ) : (Fin (N + (2 * h + 1)) → Bool) → Bool :=
+  term (N + (2 * h + 1)) (if k = 0 then uu else N + 2 * k - 1)
+    (if k = h then vv else N + 2 * k + 1) (N + 2 * k)
 
--- The terms of the second circuit: the odd inner inputs are the centres.
-def ts2 (N h : ℕ) : List (ℕ × ℕ × ℕ) :=
-  (List.range h).map (fun k => (N + (2 * k + 1), N + 2 * k, N + (2 * k + 2)))
+def tB (N h k : ℕ) : (Fin (N + (2 * h + 1)) → Bool) → Bool :=
+  term (N + (2 * h + 1)) (N + 2 * k) (N + (2 * k + 2)) (N + (2 * k + 1))
 
-theorem comb1 (N h : ℕ) (w : ℕ → Bool) (a b : ℕ) :
-    (∃ τ ∈ ts1 N h a b, w τ.1 = true ∧ (w τ.2.1 = true ∨ w τ.2.2 = true)) ↔
-      ∃ i < 2 * h + 1, w (N + i) = true ∧ ((i = 0 ∧ w a = true) ∨
-        (i + 1 = 2 * h + 1 ∧ w b = true) ∨ (i + 1 < 2 * h + 1 ∧ w (N + (i + 1)) = true)) := by
-  constructor
-  · rintro ⟨τ, hτ, h1, h2⟩
-    simp only [ts1, List.mem_map, List.mem_range] at hτ
-    obtain ⟨k, hk, rfl⟩ := hτ
-    dsimp only at h1 h2
-    rcases h2 with h2 | h2
-    · by_cases k0 : k = 0
-      · subst k0
-        rw [if_pos rfl] at h2
-        exact ⟨0, by omega, by simpa using h1, Or.inl ⟨rfl, h2⟩⟩
-      · rw [if_neg k0] at h2
-        refine ⟨2 * k - 1, by omega, h2, Or.inr (Or.inr ⟨by omega, ?_⟩)⟩
-        rw [show N + (2 * k - 1 + 1) = N + 2 * k by omega]
-        exact h1
-    · by_cases kh : k = h
-      · subst kh
-        rw [if_pos rfl] at h2
-        exact ⟨2 * k, by omega, h1, Or.inr (Or.inl ⟨rfl, h2⟩)⟩
-      · rw [if_neg kh] at h2
-        exact ⟨2 * k, by omega, h1, Or.inr (Or.inr ⟨by omega, h2⟩)⟩
-  · rintro ⟨i, hi, h1, h2 | h2 | h2⟩
-    · obtain ⟨rfl, ha⟩ := h2
-      refine ⟨_, List.mem_map.mpr ⟨0, List.mem_range.mpr (by omega), rfl⟩, ?_, Or.inl ?_⟩
-      · dsimp only
-        simpa using h1
-      · dsimp only
-        rw [if_pos rfl]
-        exact ha
-    · obtain ⟨hi2, hb⟩ := h2
-      have e : i = 2 * h := by omega
-      subst e
-      refine ⟨_, List.mem_map.mpr ⟨h, List.mem_range.mpr (by omega), rfl⟩, h1, Or.inr ?_⟩
-      dsimp only
-      rw [if_pos rfl]
-      exact hb
-    · obtain ⟨hlt, hn⟩ := h2
-      rcases Nat.even_or_odd' i with ⟨k, rfl | rfl⟩
-      · refine ⟨_, List.mem_map.mpr ⟨k, List.mem_range.mpr (by omega), rfl⟩, h1, Or.inr ?_⟩
-        dsimp only
-        rw [if_neg (by omega)]
-        exact hn
-      · refine ⟨_, List.mem_map.mpr ⟨k + 1, List.mem_range.mpr (by omega), rfl⟩, ?_, Or.inl ?_⟩
-        · dsimp only
-          rw [show N + 2 * (k + 1) = N + (2 * k + 1 + 1) by omega]
-          exact hn
-        · dsimp only
-          rw [if_neg (by omega), show N + (2 * (k + 1) - 1) = N + (2 * k + 1) by omega]
-          exact h1
+theorem tA_size (N h : ℕ) (u v : Fin N) (k : ℕ) (hk : k < h + 1) :
+    HasCircuitSize (N + (2 * h + 1)) (tA N h u.val v.val k) 2 := by
+  have hu := u.isLt
+  have hv := v.isLt
+  refine term_size _ _ _ _ ?_ ?_ ?_
+  · split_ifs <;> omega
+  · split_ifs <;> omega
+  · omega
 
-theorem comb2 (N h : ℕ) (w : ℕ → Bool) (a b : ℕ) :
-    ((w a = true ∧ w N = true) ∨ (w b = true ∧ w (N + 2 * h) = true) ∨
-        ∃ τ ∈ ts2 N h, w τ.1 = true ∧ (w τ.2.1 = true ∨ w τ.2.2 = true)) ↔
-      ∃ i < 2 * h + 1, w (N + i) = true ∧ ((i = 0 ∧ w a = true) ∨
-        (i + 1 = 2 * h + 1 ∧ w b = true) ∨ (i + 1 < 2 * h + 1 ∧ w (N + (i + 1)) = true)) := by
-  constructor
-  · rintro (⟨ha, h0⟩ | ⟨hb, hl⟩ | ⟨τ, hτ, h1, h2⟩)
-    · exact ⟨0, by omega, by simpa using h0, Or.inl ⟨rfl, ha⟩⟩
-    · exact ⟨2 * h, by omega, hl, Or.inr (Or.inl ⟨rfl, hb⟩)⟩
-    · simp only [ts2, List.mem_map, List.mem_range] at hτ
-      obtain ⟨k, hk, rfl⟩ := hτ
-      dsimp only at h1 h2
-      rcases h2 with h2 | h2
-      · exact ⟨2 * k, by omega, h2, Or.inr (Or.inr ⟨by omega, h1⟩)⟩
-      · exact ⟨2 * k + 1, by omega, h1, Or.inr (Or.inr ⟨by omega, h2⟩)⟩
-  · rintro ⟨i, hi, h1, h2 | h2 | h2⟩
-    · obtain ⟨rfl, ha⟩ := h2
-      exact Or.inl ⟨ha, by simpa using h1⟩
-    · obtain ⟨hi2, hb⟩ := h2
-      have e : i = 2 * h := by omega
-      subst e
-      exact Or.inr (Or.inl ⟨hb, h1⟩)
-    · obtain ⟨hlt, hn⟩ := h2
-      rcases Nat.even_or_odd' i with ⟨k, rfl | rfl⟩
-      · exact Or.inr (Or.inr ⟨_, List.mem_map.mpr ⟨k, List.mem_range.mpr (by omega), rfl⟩,
-          hn, Or.inl h1⟩)
-      · exact Or.inr (Or.inr ⟨_, List.mem_map.mpr ⟨k, List.mem_range.mpr (by omega), rfl⟩,
-          h1, Or.inr hn⟩)
+theorem tB_size (N h k : ℕ) (hk : k < h) :
+    HasCircuitSize (N + (2 * h + 1)) (tB N h k) 2 := by
+  refine term_size _ _ _ _ ?_ ?_ ?_ <;> omega
 
--- The path condition of the statement, read on the list of input values.
-theorem fin_conv (N m : ℕ) (x : Fin (N + m) → Bool) (u v : Fin N) :
-    (∃ i : Fin m, x (Fin.natAdd N i) = true ∧ ((i.val = 0 ∧ x (Fin.castAdd m u) = true) ∨
-        (i.val + 1 = m ∧ x (Fin.castAdd m v) = true) ∨
-        ∃ j : Fin m, j.val = i.val + 1 ∧ x (Fin.natAdd N j) = true)) ↔
-      ∃ i < m, (List.ofFn x).getD (N + i) false = true ∧
-        ((i = 0 ∧ (List.ofFn x).getD u.val false = true) ∨
-          (i + 1 = m ∧ (List.ofFn x).getD v.val false = true) ∨
-          (i + 1 < m ∧ (List.ofFn x).getD (N + (i + 1)) false = true)) := by
-  have key : ∀ i (hi : i < m), (List.ofFn x).getD (N + i) false = x (Fin.natAdd N ⟨i, hi⟩) := by
-    intro i hi
-    rw [getD_ofFn x (N + i) (by omega)]
-    rfl
-  have ku : ∀ q : Fin N, (List.ofFn x).getD q.val false = x (Fin.castAdd m q) := by
-    intro q
-    have := q.isLt
-    rw [getD_ofFn x q.val (by omega)]
-    rfl
-  constructor
-  · rintro ⟨i, h1, h2⟩
-    refine ⟨i.val, i.isLt, by rw [key _ i.isLt]; exact h1, ?_⟩
-    rcases h2 with h | h | ⟨j, hj, hx⟩
-    · exact Or.inl ⟨h.1, by rw [ku]; exact h.2⟩
-    · exact Or.inr (Or.inl ⟨h.1, by rw [ku]; exact h.2⟩)
-    · have hjl := j.isLt
-      refine Or.inr (Or.inr ⟨by omega, ?_⟩)
-      rw [key _ (by omega)]
-      have e : (⟨i.val + 1, by omega⟩ : Fin m) = j := Fin.ext hj.symm
-      rw [e]
-      exact hx
-  · rintro ⟨i, hi, h1, h2⟩
-    refine ⟨⟨i, hi⟩, by rw [← key i hi]; exact h1, ?_⟩
-    rcases h2 with h | h | ⟨hlt, hx⟩
-    · exact Or.inl ⟨h.1, by rw [← ku]; exact h.2⟩
-    · exact Or.inr (Or.inl ⟨h.1, by rw [← ku]; exact h.2⟩)
-    · exact Or.inr (Or.inr ⟨⟨i + 1, hlt⟩, rfl, by rw [← key (i + 1) hlt]; exact hx⟩)
+def pos (N h j : ℕ) : ℕ := if j < N then j else if j = N then N else N + 2 * h
 
-end PEqualNP.Outside.L_meta_572_aux
+theorem pos_lt (N h j : ℕ) (hj : j < N + 2) : pos N h j < N + (2 * h + 1) := by
+  unfold pos
+  split_ifs <;> omega
 
-open PEqualNP.Outside.L_meta_572_aux PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity in
+def pmap (N h : ℕ) (j : Fin (N + 2)) : Fin (N + (2 * h + 1)) :=
+  ⟨pos N h j.val, pos_lt N h j.val j.isLt⟩
+
+theorem x_pmap (N h : ℕ) (x : Fin (N + (2 * h + 1)) → Bool) (j : Fin (N + 2)) :
+    x (pmap N h j) = inp (N + (2 * h + 1)) (pos N h j.val) x := by
+  unfold inp
+  rw [dif_pos (pos_lt N h j.val j.isLt)]
+  rfl
+
+theorem pos_cast (N h : ℕ) (i : Fin N) : pos N h (Fin.castAdd 2 i).val = i.val := by
+  show pos N h i.val = i.val
+  unfold pos
+  rw [if_pos i.isLt]
+
+theorem pos_zero (N h : ℕ) : pos N h (Fin.natAdd N (0 : Fin 2)).val = N := by
+  have e : (Fin.natAdd N (0 : Fin 2)).val = N := by simp
+  rw [e]
+  unfold pos
+  rw [if_neg (by omega), if_pos rfl]
+
+theorem pos_one (N h : ℕ) : pos N h (Fin.natAdd N (1 : Fin 2)).val = N + 2 * h := by
+  have e : (Fin.natAdd N (1 : Fin 2)).val = N + 1 := by simp
+  rw [e]
+  unfold pos
+  rw [if_neg (by omega), if_neg (by omega)]
+
+theorem partA (N h : ℕ) (u v : Fin N) (g : (Fin N → Bool) → Bool) (s : ℕ)
+    (hs : HasCircuitSize N g s) (F : (Fin (N + (2 * h + 1)) → Bool) → Bool)
+    (hF : ∀ x : Fin (N + (2 * h + 1)) → Bool, ∃ (p : Prop) (d : Decidable p),
+      F x = (g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || @decide p d) ∧
+      (p ↔ ∃ i : Fin (2 * h + 1), x (Fin.natAdd N i) = true ∧
+        ((i.val = 0 ∧ x (Fin.castAdd (2 * h + 1) u) = true) ∨
+        (i.val + 1 = 2 * h + 1 ∧ x (Fin.castAdd (2 * h + 1) v) = true) ∨
+        ∃ j : Fin (2 * h + 1), j.val = i.val + 1 ∧ x (Fin.natAdd N j) = true))) :
+    HasCircuitSize (N + (2 * h + 1)) F (3 * h + s + 3) := by
+  have hb : HasCircuitSize (N + (2 * h + 1))
+      (fun x : Fin (N + (2 * h + 1)) → Bool => g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i))) s :=
+    relabel_size (Fin.castAdd (2 * h + 1)) g s hs
+  have hc := bigOr _ (tA N h u.val v.val) s hb (h + 1) (fun k hk => tA_size N h u v k hk)
+  refine congrSize (weaken hc (by omega)) (fun x => ?_)
+  obtain ⟨p, d, hFx, hp⟩ := hF x
+  rw [hFx]
+  show (g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || @decide p d) =
+    (g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || orUpTo (tA N h u.val v.val) (h + 1) x)
+  congr 1
+  rw [Bool.eq_iff_iff, decide_eq_true_eq, orUpTo_true]
+  refine hp.trans ((pathE_iff N (2 * h + 1) u v x).trans
+    ((combA (fun q => inp (N + (2 * h + 1)) q x = true) N h u.val v.val).trans ?_))
+  refine exists_congr (fun k => and_congr_right (fun _ => ?_))
+  exact (term_true _ _ _ _ x).symm
+
+theorem partB (N h : ℕ) (u v : Fin N) (g : (Fin N → Bool) → Bool) (s : ℕ)
+    (hs : HasCircuitSize (N + 2) (fun x : Fin (N + 2) → Bool =>
+      g (fun i : Fin N => x (Fin.castAdd 2 i)) ||
+        (x (Fin.castAdd 2 u) && x (Fin.natAdd N (0 : Fin 2))) ||
+        (x (Fin.castAdd 2 v) && x (Fin.natAdd N (1 : Fin 2)))) s)
+    (F : (Fin (N + (2 * h + 1)) → Bool) → Bool)
+    (hF : ∀ x : Fin (N + (2 * h + 1)) → Bool, ∃ (p : Prop) (d : Decidable p),
+      F x = (g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || @decide p d) ∧
+      (p ↔ ∃ i : Fin (2 * h + 1), x (Fin.natAdd N i) = true ∧
+        ((i.val = 0 ∧ x (Fin.castAdd (2 * h + 1) u) = true) ∨
+        (i.val + 1 = 2 * h + 1 ∧ x (Fin.castAdd (2 * h + 1) v) = true) ∨
+        ∃ j : Fin (2 * h + 1), j.val = i.val + 1 ∧ x (Fin.natAdd N j) = true))) :
+    HasCircuitSize (N + (2 * h + 1)) F (3 * h + s) := by
+  have hb := relabel_size (pmap N h) _ s hs
+  have hc := bigOr _ (tB N h) s hb h (fun k hk => tB_size N h k hk)
+  refine congrSize (weaken hc (by omega)) (fun x => ?_)
+  obtain ⟨p, d, hFx, hp⟩ := hF x
+  rw [hFx]
+  have hG : g (fun i : Fin N => (x ∘ pmap N h) (Fin.castAdd 2 i)) =
+      g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) := by
+    congr 1
+    funext i
+    show x (pmap N h (Fin.castAdd 2 i)) = x (Fin.castAdd (2 * h + 1) i)
+    rw [x_pmap N h x, pos_cast, inp_castAdd N (2 * h + 1) x]
+  have hU : (x ∘ pmap N h) (Fin.castAdd 2 u) = inp (N + (2 * h + 1)) u.val x := by
+    show x (pmap N h (Fin.castAdd 2 u)) = _
+    rw [x_pmap N h x, pos_cast]
+  have hV : (x ∘ pmap N h) (Fin.castAdd 2 v) = inp (N + (2 * h + 1)) v.val x := by
+    show x (pmap N h (Fin.castAdd 2 v)) = _
+    rw [x_pmap N h x, pos_cast]
+  have hA : (x ∘ pmap N h) (Fin.natAdd N (0 : Fin 2)) = inp (N + (2 * h + 1)) N x := by
+    show x (pmap N h (Fin.natAdd N (0 : Fin 2))) = _
+    rw [x_pmap N h x, pos_zero]
+  have hB : (x ∘ pmap N h) (Fin.natAdd N (1 : Fin 2)) = inp (N + (2 * h + 1)) (N + 2 * h) x := by
+    show x (pmap N h (Fin.natAdd N (1 : Fin 2))) = _
+    rw [x_pmap N h x, pos_one]
+  show (g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || @decide p d) =
+    (((g (fun i : Fin N => (x ∘ pmap N h) (Fin.castAdd 2 i)) ||
+        ((x ∘ pmap N h) (Fin.castAdd 2 u) && (x ∘ pmap N h) (Fin.natAdd N (0 : Fin 2)))) ||
+        ((x ∘ pmap N h) (Fin.castAdd 2 v) && (x ∘ pmap N h) (Fin.natAdd N (1 : Fin 2)))) ||
+      orUpTo (tB N h) h x)
+  rw [hG, hU, hV, hA, hB, Bool.or_assoc, Bool.or_assoc]
+  congr 1
+  rw [Bool.eq_iff_iff, decide_eq_true_eq, Bool.or_eq_true, Bool.or_eq_true, Bool.and_eq_true,
+    Bool.and_eq_true, orUpTo_true]
+  refine hp.trans ((pathE_iff N (2 * h + 1) u v x).trans
+    ((combB (fun q => inp (N + (2 * h + 1)) q x = true) N h u.val v.val).trans ?_))
+  refine or_assoc.trans (or_congr Iff.rfl (or_congr Iff.rfl ?_))
+  refine exists_congr (fun k => and_congr_right (fun _ => ?_))
+  exact (term_true _ _ _ _ x).symm
+
+end LMeta572
+
 theorem PEqualNP.Outside.L_meta_572 : ∀ (N h : ℕ) (u v : Fin N) (g : (Fin N → Bool) → Bool), u ≠ v → 3 ≤ h → g (fun _ : Fin N => false) = false → (∃ x : Fin N → Bool, x u = true ∧ g x = false) → (∃ x : Fin N → Bool, x v = true ∧ g x = false) → ∀ s : ℕ, (PEqualNP.MetaComplexity.HasCircuitSize N g s → PEqualNP.MetaComplexity.HasCircuitSize (N + (2 * h + 1)) (fun x : Fin (N + 2 * h + 1) → Bool => g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || decide (∃ i : Fin (2 * h + 1), x (Fin.natAdd N i) = true ∧ ((i.val = 0 ∧ x (Fin.castAdd (2 * h + 1) u) = true) ∨ (i.val + 1 = 2 * h + 1 ∧ x (Fin.castAdd (2 * h + 1) v) = true) ∨ ∃ j : Fin (2 * h + 1), j.val = i.val + 1 ∧ x (Fin.natAdd N j) = true))) (3 * h + s + 3)) ∧ (PEqualNP.MetaComplexity.HasCircuitSize (N + 2) (fun x : Fin (N + 2) → Bool => g (fun i : Fin N => x (Fin.castAdd 2 i)) || (x (Fin.castAdd 2 u) && x (Fin.natAdd N (0 : Fin 2))) || (x (Fin.castAdd 2 v) && x (Fin.natAdd N (1 : Fin 2)))) s → PEqualNP.MetaComplexity.HasCircuitSize (N + (2 * h + 1)) (fun x : Fin (N + 2 * h + 1) → Bool => g (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i)) || decide (∃ i : Fin (2 * h + 1), x (Fin.natAdd N i) = true ∧ ((i.val = 0 ∧ x (Fin.castAdd (2 * h + 1) u) = true) ∨ (i.val + 1 = 2 * h + 1 ∧ x (Fin.castAdd (2 * h + 1) v) = true) ∨ ∃ j : Fin (2 * h + 1), j.val = i.val + 1 ∧ x (Fin.natAdd N j) = true))) (3 * h + s)) := by
   intro N h u v g _ _ _ _ _ s
-  have hul := u.isLt
-  have hvl := v.isLt
   constructor
-  · rintro ⟨D, hF, hsz, hD⟩
-    refine ⟨extC N (N + (2 * h + 1)) id D (ts1 N h u.val v.val), extC_fanin _ _ _ _ _ hF, ?_, ?_⟩
-    · rw [extC_size]
-      have e : (ts1 N h u.val v.val).length = h + 1 := by simp [ts1]
-      have : D.size ≤ s := hsz
-      omega
-    · intro x
-      have hσ : ∀ i, i < (List.ofFn (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i))).length →
-          id i < (List.ofFn x).length ∧
-            (List.ofFn (fun i : Fin N => x (Fin.castAdd (2 * h + 1) i))).getD i false
-              = (List.ofFn x).getD (id i) false := by
-        intro i hi
-        simp only [List.length_ofFn] at hi ⊢
-        refine ⟨by simp only [id]; omega, ?_⟩
-        rw [getD_ofFn _ i hi, id, getD_ofFn x i (by omega)]
-        rfl
-      have hts : ∀ τ ∈ ts1 N h u.val v.val, τ.1 < (List.ofFn x).length ∧
-          τ.2.1 < (List.ofFn x).length ∧ τ.2.2 < (List.ofFn x).length := by
-        intro τ hτ
-        simp only [ts1, List.mem_map, List.mem_range] at hτ
-        obtain ⟨k, hk, rfl⟩ := hτ
-        simp only [List.length_ofFn]
-        refine ⟨by omega, ?_, ?_⟩ <;> split_ifs <;> omega
-      have key := extC_eval D _ _ id _ hσ hts
-      simp only [List.length_ofFn] at key
-      apply Bool.eq_iff_iff.mpr
-      rw [key, hD]
-      simp only [Bool.or_eq_true, decide_eq_true_eq]
-      exact or_congr Iff.rfl
-        ((comb1 N h (fun i => (List.ofFn x).getD i false) u.val v.val).trans
-          (fin_conv N (2 * h + 1) x u v).symm)
-  · rintro ⟨D, hF, hsz, hD⟩
-    refine ⟨extC (N + 2) (N + (2 * h + 1)) (fun i => if i ≤ N then i else N + 2 * h) D (ts2 N h),
-      extC_fanin _ _ _ _ _ hF, ?_, ?_⟩
-    · rw [extC_size]
-      have e : (ts2 N h).length = h := by simp [ts2]
-      have : D.size ≤ s := hsz
-      omega
-    · intro x
-      obtain ⟨x', hx'⟩ : ∃ x' : Fin (N + 2) → Bool, ∀ i : Fin (N + 2),
-          x' i = (List.ofFn x).getD (if i.val ≤ N then i.val else N + 2 * h) false :=
-        ⟨_, fun _ => rfl⟩
-      have hσ : ∀ i, i < (List.ofFn x').length →
-          (fun i => if i ≤ N then i else N + 2 * h) i < (List.ofFn x).length ∧
-            (List.ofFn x').getD i false
-              = (List.ofFn x).getD ((fun i => if i ≤ N then i else N + 2 * h) i) false := by
-        intro i hi
-        simp only [List.length_ofFn] at hi ⊢
-        refine ⟨by split_ifs <;> omega, ?_⟩
-        rw [getD_ofFn x' i hi, hx']
-      have hts : ∀ τ ∈ ts2 N h, τ.1 < (List.ofFn x).length ∧
-          τ.2.1 < (List.ofFn x).length ∧ τ.2.2 < (List.ofFn x).length := by
-        intro τ hτ
-        simp only [ts2, List.mem_map, List.mem_range] at hτ
-        obtain ⟨k, hk, rfl⟩ := hτ
-        simp only [List.length_ofFn]
-        exact ⟨by omega, by omega, by omega⟩
-      have key := extC_eval D _ _ (fun i => if i ≤ N then i else N + 2 * h) _ hσ hts
-      simp only [List.length_ofFn] at key
-      have hDx := hD x'
-      beta_reduce at hDx
-      have e1 : (fun i : Fin N => x' (Fin.castAdd 2 i))
-          = fun i : Fin N => x (Fin.castAdd (2 * h + 1) i) := by
-        funext i
-        have := i.isLt
-        rw [hx', if_pos (by simp), getD_ofFn x _ (by simp; omega)]
-        rfl
-      have e2 : ∀ q : Fin N, x' (Fin.castAdd 2 q) = (List.ofFn x).getD q.val false := by
-        intro q
-        have := q.isLt
-        rw [hx', if_pos (by simp)]
-        rfl
-      have e4 : x' (Fin.natAdd N (0 : Fin 2)) = (List.ofFn x).getD N false := by
-        rw [hx', if_pos (by simp)]
-        simp
-      have e5 : x' (Fin.natAdd N (1 : Fin 2)) = (List.ofFn x).getD (N + 2 * h) false := by
-        rw [hx', if_neg (by simp)]
-      rw [e1, e2 u, e2 v, e4, e5] at hDx
-      apply Bool.eq_iff_iff.mpr
-      rw [key, hDx]
-      simp only [Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq]
-      have E := (comb2 N h (fun i => (List.ofFn x).getD i false) u.val v.val).trans
-        (fin_conv N (2 * h + 1) x u v).symm
-      constructor
-      · rintro (((hg | h1) | h2) | h3)
-        · exact Or.inl hg
-        · exact Or.inr (E.mp (Or.inl h1))
-        · exact Or.inr (E.mp (Or.inr (Or.inl h2)))
-        · exact Or.inr (E.mp (Or.inr (Or.inr h3)))
-      · rintro (hg | hE)
-        · exact Or.inl (Or.inl (Or.inl hg))
-        · rcases E.mpr hE with h1 | h2 | h3
-          · exact Or.inl (Or.inl (Or.inr h1))
-          · exact Or.inl (Or.inr h2)
-          · exact Or.inr h3
+  · intro hs
+    exact LMeta572.partA N h u v g s hs _ (fun x => ⟨_, _, rfl, Iff.rfl⟩)
+  · intro hs
+    exact LMeta572.partB N h u v g s hs _ (fun x => ⟨_, _, rfl, Iff.rfl⟩)
